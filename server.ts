@@ -10,7 +10,7 @@ import { createServer as createViteServer } from "vite";
 const execAsync = promisify(exec);
 
 // Configuration
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 const HISTORY_FILE = path.join(process.cwd(), "downloads_history.json");
 
 // Buffers for valid silent MP3 and blank MP4
@@ -199,6 +199,18 @@ function getYtDlpMetadata(url: string): Promise<any> {
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // Enable CORS for Vercel cross-origin requests
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(200);
+      return;
+    }
+    next();
+  });
 
   // API Endpoints
 
@@ -488,14 +500,16 @@ async function startServer() {
   });
 
   // Vite Integration
-  if (process.env.NODE_ENV !== "production") {
+  const distPath = path.join(process.cwd(), "dist");
+  const isProductionMode = process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, "index.html"));
+
+  if (!isProductionMode) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));

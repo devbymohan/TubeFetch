@@ -12,6 +12,8 @@ RUN pip3 install --break-system-packages yt-dlp || pip3 install yt-dlp
 
 WORKDIR /app
 
+ENV NODE_ENV=production
+
 # Copy dependency files
 COPY package*.json ./
 
