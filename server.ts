@@ -5,7 +5,6 @@ import os from "os";
 import axios from "axios";
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
-import { createServer as createViteServer } from "vite";
 
 const execAsync = promisify(exec);
 
@@ -504,11 +503,19 @@ async function startServer() {
   const isProductionMode = process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, "index.html"));
 
   if (!isProductionMode) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (_) {
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
   } else {
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
