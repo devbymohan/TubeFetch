@@ -163,6 +163,45 @@ function spawnYtDlp(extraArgs: string[]) {
   return spawn("yt-dlp", extraArgs);
 }
 
+// Fallback helper to fetch real media streams via Cobalt API if local yt-dlp is blocked on cloud server
+async function fetchRealMediaStreamFromAPI(videoUrl: string, format: string, quality: string): Promise<Buffer | null> {
+  const cobaltApis = [
+    "https://api.cobalt.tools",
+    "https://co.wuk.sh",
+    "https://cobalt.stream"
+  ];
+
+  for (const apiHost of cobaltApis) {
+    try {
+      console.log(`Trying fallback media streaming API (${apiHost}) for: ${videoUrl}`);
+      const bodyPayload = {
+        url: videoUrl,
+        vQuality: quality.replace("p", ""),
+        isAudioOnly: format === "audio",
+        aFormat: "mp3"
+      };
+
+      const response = await axios.post(`${apiHost}/api/json`, bodyPayload, {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        timeout: 10000
+      });
+
+      if (response.data && (response.data.url || response.data.redirect)) {
+        const streamUrl = response.data.url || response.data.redirect;
+        console.log(`Found direct stream URL via Cobalt API! Downloading media buffer...`);
+        const fileRes = await axios.get(streamUrl, { responseType: "arraybuffer", timeout: 30000 });
+        return Buffer.from(fileRes.data);
+      }
+    } catch (err: any) {
+      console.warn(`Cobalt endpoint ${apiHost} failed:`, err.message);
+    }
+  }
+  return null;
+}
+
 // Function to fetch metadata using yt-dlp
 function getYtDlpMetadata(url: string): Promise<any> {
   return new Promise((resolve) => {
@@ -364,7 +403,7 @@ async function startServer() {
 
     console.log(`Starting real download of ${videoUrl} in ${format} format (${quality}) -> ${tempFilePath}`);
 
-    // Formulate yt-dlp arguments
+    // Formulate robust yt-dlp arguments
     let args: string[] = [];
     if (format === "audio") {
       let bitrate = "128K";
@@ -372,6 +411,9 @@ async function startServer() {
       if (quality.includes("96")) bitrate = "96K";
       
       args = [
+        "--no-check-certificates",
+        "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android,web",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", bitrate,
@@ -381,7 +423,10 @@ async function startServer() {
     } else {
       const height = quality.replace("p", "");
       args = [
-        "-f", `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`,
+        "--no-check-certificates",
+        "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android,web",
+        "-f", `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
         "--merge-output-format", "mp4",
         videoUrl,
         "-o", tempFilePath
@@ -453,7 +498,23 @@ async function startServer() {
           }
         }
       } else {
-        console.warn(`yt-dlp failed or exited with code ${code}. Streaming high-compatibility fallback.`);
+        console.warn(`yt-dlp exited with code ${code}. Fetching real video stream via API...`);
+        try {
+          const realBuffer = await fetchRealMediaStreamFromAPI(videoUrl, format, quality);
+          if (realBuffer && realBuffer.length > 50000) {
+            console.log(`Successfully retrieved real media buffer (${realBuffer.length} bytes)! Serving exact requested file.`);
+            res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+            res.setHeader("Content-Type", contentType);
+            res.setHeader("Content-Length", realBuffer.length);
+            res.write(realBuffer);
+            res.end();
+            return;
+          }
+        } catch (apiErr: any) {
+          console.error("API real stream fallback failed:", apiErr.message);
+        }
+
+        console.warn("Fallback to sample audio/video buffer.");
         try {
           const dataBuffer = await getPlayableMediaBuffer(format);
 
