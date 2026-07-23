@@ -78,9 +78,14 @@ export default function App() {
   const fetchHistory = async () => {
     try {
       const res = await axios.get("/api/history");
-      setHistory(res.data);
+      if (Array.isArray(res.data)) {
+        setHistory(res.data);
+      } else {
+        setHistory([]);
+      }
     } catch (err) {
       console.error("Failed to load history:", err);
+      setHistory([]);
     }
   };
 
