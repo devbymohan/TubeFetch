@@ -93,6 +93,8 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
   };
 }
 
+const API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || "";
+
 export default function App() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -123,7 +125,7 @@ export default function App() {
 
   const fetchHistory = async () => {
     try {
-      const res = await axios.get("/api/history");
+      const res = await axios.get(`${API_BASE}/api/history`);
       if (Array.isArray(res.data)) {
         setHistory(res.data);
       } else {
@@ -160,7 +162,7 @@ export default function App() {
     setVideoInfo(null);
 
     try {
-      const res = await axios.get(`/api/info?url=${encodeURIComponent(urlToFetch)}`);
+      const res = await axios.get(`${API_BASE}/api/info?url=${encodeURIComponent(urlToFetch)}`);
       if (res.data && typeof res.data === "object" && res.data.formats && Array.isArray(res.data.formats.video)) {
         setVideoInfo(res.data);
       } else {
@@ -235,7 +237,7 @@ export default function App() {
 
     try {
       const response = await axios({
-        url: `/api/download?id=${videoInfo.id}&format=${format}&quality=${encodeURIComponent(quality)}&title=${encodeURIComponent(videoInfo.title)}`,
+        url: `${API_BASE}/api/download?id=${videoInfo.id}&format=${format}&quality=${encodeURIComponent(quality)}&title=${encodeURIComponent(videoInfo.title)}`,
         method: "GET",
         responseType: "blob",
         onDownloadProgress: (progressEvent) => {
@@ -310,8 +312,14 @@ export default function App() {
         size
       };
 
-      const savedHist = await axios.post("/api/history", historyRecord);
-      setHistory(prev => [savedHist.data, ...prev]);
+      try {
+        const savedHist = await axios.post(`${API_BASE}/api/history`, historyRecord);
+        setHistory(prev => [savedHist.data, ...prev]);
+      } catch (_) {
+        // Fallback local history record if API unreachable
+        const localHist = { ...historyRecord, timestamp: new Date().toISOString(), uniqueId: Math.random().toString(36).substring(2, 11) };
+        setHistory(prev => [localHist, ...prev]);
+      }
 
       setDownloadState(prev => ({ ...prev, isDownloading: false, progress: 100 }));
       showToast("Download succeeded! File saved to your device.", "success");
