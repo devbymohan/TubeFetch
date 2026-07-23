@@ -155,11 +155,19 @@ function saveHistory(history: any[]) {
   }
 }
 
+// Cross-platform helper to spawn yt-dlp on both Windows and Linux
+function spawnYtDlp(extraArgs: string[]) {
+  if (os.platform() === "win32") {
+    return spawn("py", ["-m", "yt_dlp", ...extraArgs]);
+  }
+  return spawn("yt-dlp", extraArgs);
+}
+
 // Function to fetch metadata using yt-dlp
 function getYtDlpMetadata(url: string): Promise<any> {
   return new Promise((resolve) => {
     console.log(`Executing yt-dlp metadata fetch for: ${url}`);
-    const ytDlp = spawn("py", ["-m", "yt_dlp", "-j", "--no-playlist", url]);
+    const ytDlp = spawnYtDlp(["-j", "--no-playlist", url]);
     let stdoutData = "";
     let stderrData = "";
     
@@ -380,7 +388,7 @@ async function startServer() {
       ];
     }
 
-    const ytDlpProcess = spawn("py", ["-m", "yt_dlp", ...args]);
+    const ytDlpProcess = spawnYtDlp(args);
 
     let isClosed = false;
 
