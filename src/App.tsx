@@ -93,7 +93,9 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
   };
 }
 
-const API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || "";
+const DEFAULT_RENDER_BACKEND = "https://tubefetch-backend.onrender.com";
+const API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || 
+  (typeof window !== "undefined" && window.location.hostname.includes("vercel.app") ? DEFAULT_RENDER_BACKEND : "");
 
 export default function App() {
   const [url, setUrl] = useState("");
