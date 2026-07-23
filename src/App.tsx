@@ -93,6 +93,41 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
   };
 }
 
+// Fallback helper to stream/download real YouTube media directly if backend server is suspended
+async function downloadRealVideoClientSide(videoId: string, format: "video" | "audio", quality: string): Promise<string | null> {
+  const cobaltApis = [
+    "https://api.cobalt.tools",
+    "https://co.wuk.sh",
+    "https://cobalt.stream"
+  ];
+
+  for (const apiHost of cobaltApis) {
+    try {
+      const bodyPayload = {
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        vQuality: quality.replace("p", ""),
+        isAudioOnly: format === "audio",
+        aFormat: "mp3"
+      };
+
+      const res = await axios.post(`${apiHost}/api/json`, bodyPayload, {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        timeout: 8000
+      });
+
+      if (res.data && (res.data.url || res.data.redirect)) {
+        return res.data.url || res.data.redirect;
+      }
+    } catch (_) {
+      // try next API
+    }
+  }
+  return null;
+}
+
 const DEFAULT_RENDER_BACKEND = "https://tubefetch-backend.onrender.com";
 const API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || 
   (typeof window !== "undefined" && window.location.hostname.includes("vercel.app") ? DEFAULT_RENDER_BACKEND : "");
@@ -328,7 +363,41 @@ export default function App() {
 
     } catch (err) {
       clearInterval(prepInterval);
-      console.error(err);
+      console.warn("Backend server request failed or suspended. Attempting direct browser stream download...");
+      
+      try {
+        const directUrl = await downloadRealVideoClientSide(videoInfo.id, format, quality);
+        if (directUrl) {
+          const anchor = document.createElement("a");
+          anchor.href = directUrl;
+          anchor.target = "_blank";
+          anchor.setAttribute("download", `${videoInfo.title}.${format === "audio" ? "mp3" : "mp4"}`);
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+
+          const localHist = {
+            id: videoInfo.id,
+            title: videoInfo.title,
+            channel: videoInfo.channel,
+            thumbnail: videoInfo.thumbnail,
+            duration: videoInfo.duration,
+            format,
+            quality,
+            size,
+            timestamp: new Date().toISOString(),
+            uniqueId: Math.random().toString(36).substring(2, 11)
+          };
+          setHistory(prev => [localHist, ...prev]);
+
+          setDownloadState(prev => ({ ...prev, isDownloading: false, progress: 100 }));
+          showToast("Direct video stream download started!", "success");
+          return;
+        }
+      } catch (fallbackErr) {
+        console.error("Direct browser stream download failed:", fallbackErr);
+      }
+
       showToast("Download process was interrupted or failed.", "error");
       setDownloadState(prev => ({ ...prev, isDownloading: false }));
     }
