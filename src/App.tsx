@@ -128,7 +128,7 @@ async function downloadRealVideoClientSide(videoId: string, format: "video" | "a
   return null;
 }
 
-const DEFAULT_RENDER_BACKEND = "https://tubefetch-backend.onrender.com";
+const DEFAULT_RENDER_BACKEND = "https://tubefetch-backend-jdb6.onrender.com";
 const API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || 
   (typeof window !== "undefined" && window.location.hostname.includes("vercel.app") ? DEFAULT_RENDER_BACKEND : "");
 

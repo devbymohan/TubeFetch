@@ -413,7 +413,7 @@ async function startServer() {
       args = [
         "--no-check-certificates",
         "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android,web",
+        "--extractor-args", "youtube:player_client=android_vr,web",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", bitrate,
@@ -425,7 +425,7 @@ async function startServer() {
       args = [
         "--no-check-certificates",
         "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android,web",
+        "--extractor-args", "youtube:player_client=android_vr,web",
         "-f", `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
         "--merge-output-format", "mp4",
         videoUrl,

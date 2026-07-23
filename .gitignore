@@ -7,4 +7,8 @@ coverage/
 .env*
 !.env.example
 downloads_history.json
+*.mp4
+*.webm
+*.mp3
+*.m4a
 
