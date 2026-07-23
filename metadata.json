@@ -1,0 +1,6 @@
+{
+  "name": "TubeFetch",
+  "description": "TubeFetch is a modern YouTube video and audio format viewer and downloader. Retrieve available formats, inspect details, and download content.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
