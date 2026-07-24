@@ -95,31 +95,42 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
 
 // Fallback helper to stream/download real YouTube media directly if backend server is suspended
 async function downloadRealVideoClientSide(videoId: string, format: "video" | "audio", quality: string): Promise<string | null> {
-  const cobaltApis = [
-    "https://api.cobalt.tools",
-    "https://co.wuk.sh",
-    "https://cobalt.stream"
+  const cleanQuality = quality.replace("p", "") || "720";
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  
+  const bodyV10 = {
+    url: videoUrl,
+    videoQuality: cleanQuality,
+    downloadMode: format === "audio" ? "audio" : "auto",
+    audioFormat: "mp3"
+  };
+
+  const bodyLegacy = {
+    url: videoUrl,
+    vQuality: cleanQuality,
+    isAudioOnly: format === "audio",
+    aFormat: "mp3"
+  };
+
+  const apis = [
+    { url: "https://api.cobalt.tools/", body: bodyV10 },
+    { url: "https://cobalt.tools/api/json", body: bodyLegacy },
+    { url: "https://co.wuk.sh/api/json", body: bodyLegacy }
   ];
 
-  for (const apiHost of cobaltApis) {
+  for (const item of apis) {
     try {
-      const bodyPayload = {
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        vQuality: quality.replace("p", ""),
-        isAudioOnly: format === "audio",
-        aFormat: "mp3"
-      };
-
-      const res = await axios.post(`${apiHost}/api/json`, bodyPayload, {
+      const res = await axios.post(item.url, item.body, {
         headers: {
           "Accept": "application/json",
           "Content-Type": "application/json"
         },
-        timeout: 8000
+        timeout: 9000
       });
 
-      if (res.data && (res.data.url || res.data.redirect)) {
-        return res.data.url || res.data.redirect;
+      const dlUrl = res.data?.url || res.data?.redirect || res.data?.picker?.[0]?.url;
+      if (dlUrl) {
+        return dlUrl;
       }
     } catch (_) {
       // try next API

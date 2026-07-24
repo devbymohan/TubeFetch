@@ -163,40 +163,49 @@ function spawnYtDlp(extraArgs: string[]) {
   return spawn("yt-dlp", extraArgs);
 }
 
-// Fallback helper to fetch real media streams via Cobalt API if local yt-dlp is blocked on cloud server
+// Fallback helper to fetch real media streams via Cobalt API v10 if local yt-dlp is blocked on cloud server
 async function fetchRealMediaStreamFromAPI(videoUrl: string, format: string, quality: string): Promise<Buffer | null> {
-  const cobaltApis = [
-    "https://api.cobalt.tools",
-    "https://co.wuk.sh",
-    "https://cobalt.stream"
+  const cleanQuality = quality.replace("p", "") || "720";
+  const bodyPayloadV10 = {
+    url: videoUrl,
+    videoQuality: cleanQuality,
+    downloadMode: format === "audio" ? "audio" : "auto",
+    audioFormat: "mp3"
+  };
+
+  const bodyPayloadLegacy = {
+    url: videoUrl,
+    vQuality: cleanQuality,
+    isAudioOnly: format === "audio",
+    aFormat: "mp3"
+  };
+
+  const apis = [
+    { url: "https://api.cobalt.tools/", body: bodyPayloadV10 },
+    { url: "https://cobalt.tools/api/json", body: bodyPayloadLegacy },
+    { url: "https://co.wuk.sh/api/json", body: bodyPayloadLegacy }
   ];
 
-  for (const apiHost of cobaltApis) {
+  for (const target of apis) {
     try {
-      console.log(`Trying fallback media streaming API (${apiHost}) for: ${videoUrl}`);
-      const bodyPayload = {
-        url: videoUrl,
-        vQuality: quality.replace("p", ""),
-        isAudioOnly: format === "audio",
-        aFormat: "mp3"
-      };
-
-      const response = await axios.post(`${apiHost}/api/json`, bodyPayload, {
+      console.log(`Trying fallback media streaming API (${target.url}) for: ${videoUrl}`);
+      const response = await axios.post(target.url, target.body, {
         headers: {
           "Accept": "application/json",
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         },
-        timeout: 10000
+        timeout: 12000
       });
 
-      if (response.data && (response.data.url || response.data.redirect)) {
-        const streamUrl = response.data.url || response.data.redirect;
-        console.log(`Found direct stream URL via Cobalt API! Downloading media buffer...`);
-        const fileRes = await axios.get(streamUrl, { responseType: "arraybuffer", timeout: 30000 });
+      const resUrl = response.data?.url || response.data?.redirect || response.data?.picker?.[0]?.url;
+      if (resUrl) {
+        console.log(`Found direct stream URL via API (${resUrl.substring(0, 60)}...)! Downloading media buffer...`);
+        const fileRes = await axios.get(resUrl, { responseType: "arraybuffer", timeout: 35000 });
         return Buffer.from(fileRes.data);
       }
     } catch (err: any) {
-      console.warn(`Cobalt endpoint ${apiHost} failed:`, err.message);
+      console.warn(`Fallback API endpoint ${target.url} failed:`, err.message);
     }
   }
   return null;
@@ -206,7 +215,16 @@ async function fetchRealMediaStreamFromAPI(videoUrl: string, format: string, qua
 function getYtDlpMetadata(url: string): Promise<any> {
   return new Promise((resolve) => {
     console.log(`Executing yt-dlp metadata fetch for: ${url}`);
-    const ytDlp = spawnYtDlp(["-j", "--no-playlist", url]);
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    const ytDlp = spawnYtDlp([
+      "--no-check-certificates",
+      "--geo-bypass",
+      "--user-agent", userAgent,
+      "--extractor-args", "youtube:player_client=tv,android",
+      "-j",
+      "--no-playlist",
+      url
+    ]);
     let stdoutData = "";
     let stderrData = "";
     
@@ -404,6 +422,7 @@ async function startServer() {
     console.log(`Starting real download of ${videoUrl} in ${format} format (${quality}) -> ${tempFilePath}`);
 
     // Formulate robust yt-dlp arguments
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
     let args: string[] = [];
     if (format === "audio") {
       let bitrate = "128K";
@@ -413,7 +432,8 @@ async function startServer() {
       args = [
         "--no-check-certificates",
         "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android_vr,web",
+        "--user-agent", userAgent,
+        "--extractor-args", "youtube:player_client=tv,android",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", bitrate,
@@ -425,7 +445,8 @@ async function startServer() {
       args = [
         "--no-check-certificates",
         "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android_vr,web",
+        "--user-agent", userAgent,
+        "--extractor-args", "youtube:player_client=tv,android",
         "-f", `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
         "--merge-output-format", "mp4",
         videoUrl,
