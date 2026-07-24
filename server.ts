@@ -217,10 +217,10 @@ function getYtDlpMetadata(url: string): Promise<any> {
     console.log(`Executing yt-dlp metadata fetch for: ${url}`);
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
     const ytDlp = spawnYtDlp([
+      "--js-runtimes", "node",
       "--no-check-certificates",
       "--geo-bypass",
       "--user-agent", userAgent,
-      "--extractor-args", "youtube:player_client=tv,android",
       "-j",
       "--no-playlist",
       url
@@ -430,10 +430,10 @@ async function startServer() {
       if (quality.includes("96")) bitrate = "96K";
       
       args = [
+        "--js-runtimes", "node",
         "--no-check-certificates",
         "--geo-bypass",
         "--user-agent", userAgent,
-        "--extractor-args", "youtube:player_client=tv,android",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", bitrate,
@@ -443,10 +443,10 @@ async function startServer() {
     } else {
       const height = quality.replace("p", "");
       args = [
+        "--js-runtimes", "node",
         "--no-check-certificates",
         "--geo-bypass",
         "--user-agent", userAgent,
-        "--extractor-args", "youtube:player_client=tv,android",
         "-f", `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
         "--merge-output-format", "mp4",
         videoUrl,
