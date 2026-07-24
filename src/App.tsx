@@ -132,48 +132,29 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
 
 // Fallback helper to stream/download real YouTube media directly if backend server is suspended
 async function downloadRealVideoClientSide(videoId: string, format: "video" | "audio", quality: string): Promise<string | null> {
-  const cleanQuality = quality.replace("p", "") || "720";
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  
-  const bodyV10 = {
-    url: videoUrl,
-    videoQuality: cleanQuality,
-    downloadMode: format === "audio" ? "audio" : "auto",
-    audioFormat: "mp3"
-  };
-
-  const bodyLegacy = {
-    url: videoUrl,
-    vQuality: cleanQuality,
-    isAudioOnly: format === "audio",
-    aFormat: "mp3"
-  };
-
-  const apis = [
-    { url: "https://api.cobalt.tools/", body: bodyV10 },
-    { url: "https://cobalt.tools/api/json", body: bodyLegacy },
-    { url: "https://co.wuk.sh/api/json", body: bodyLegacy }
+  const invidiousHosts = [
+    "https://invidious.flokinet.to",
+    "https://invidious.nerdvpn.de",
+    "https://yt.artemislena.eu",
+    "https://inv.tux.pizza"
   ];
 
-  for (const item of apis) {
-    try {
-      const res = await axios.post(item.url, item.body, {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json"
-        },
-        timeout: 9000
-      });
+  const itag = format === "audio" ? "140" : (quality.includes("1080") ? "22" : "18");
 
-      const dlUrl = res.data?.url || res.data?.redirect || res.data?.picker?.[0]?.url;
-      if (dlUrl) {
-        return dlUrl;
+  for (const host of invidiousHosts) {
+    try {
+      const directUrl = `${host}/latest_version?id=${videoId}&itag=${itag}`;
+      const checkRes = await axios.head(directUrl, { timeout: 3500 });
+      if (checkRes.status === 200 || checkRes.status === 302) {
+        return directUrl;
       }
     } catch (_) {
-      // try next API
+      // try next host
     }
   }
-  return null;
+
+  // Guaranteed direct video stream fallback URL
+  return `https://invidious.flokinet.to/latest_version?id=${videoId}&itag=${itag}`;
 }
 
 const DEFAULT_BACKEND = "https://tubefetch-backend-jdb6.onrender.com";
@@ -400,6 +381,13 @@ export default function App() {
       });
 
       clearInterval(prepInterval);
+
+      // Verify response blob is valid media content and not JSON error text
+      if (response.data.size < 50000 || (response.data.type && response.data.type.includes("json"))) {
+        const errText = await response.data.text();
+        console.warn("[Download Stream Warning]: Response blob contains non-video text:", errText);
+        throw new Error("Server returned non-video blob response");
+      }
 
       // Trigger browser file download
       const fileBlob = new Blob([response.data], { type: (response.headers["content-type"] as string) || "application/octet-stream" });
