@@ -58,37 +58,74 @@ function extractYoutubeId(urlStr: string): string | null {
 async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
   let title = `YouTube Video (${videoId})`;
   let channel = "YouTube Creator";
+  let durationSec = 30;
+  let durationStr = "0:30";
+  let viewsStr = "Popular";
+  let uploadedStr = "Recently";
 
   try {
-    const oembedRes = await axios.get(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`, { timeout: 3000 });
+    const oembedRes = await axios.get(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`, { timeout: 3500 });
     if (oembedRes.data && oembedRes.data.title) {
       title = oembedRes.data.title;
       channel = oembedRes.data.author_name || channel;
     }
-  } catch (_) {
-    // ignore
-  }
+  } catch (_) {}
+
+  try {
+    const pageRes = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+      timeout: 5000
+    });
+    const html = pageRes.data || "";
+    
+    const mSec = html.match(/"lengthSeconds":"(\d+)"/);
+    if (mSec && parseInt(mSec[1], 10) > 0) {
+      durationSec = parseInt(mSec[1], 10);
+      const min = Math.floor(durationSec / 60);
+      const sec = durationSec % 60;
+      durationStr = `${min}:${sec < 10 ? '0' : ''}${sec}`;
+    }
+
+    const mViews = html.match(/"viewCount":"(\d+)"/);
+    if (mViews) {
+      const vNum = parseInt(mViews[1], 10);
+      viewsStr = vNum >= 1000000 
+        ? `${(vNum / 1000000).toFixed(1)}M views` 
+        : vNum >= 1000 
+        ? `${(vNum / 1000).toFixed(1)}K views` 
+        : `${vNum} views`;
+    }
+
+    const mDate = html.match(/"publishDate":"([^"]+)"/);
+    if (mDate) {
+      uploadedStr = mDate[1].split("T")[0];
+    }
+  } catch (_) {}
+
+  // Calculate realistic file sizes matching EXACT duration
+  const videoFormats = [
+    { quality: "1080p", fps: 30, size: `${((durationSec * 2.2) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
+    { quality: "720p", fps: 30, size: `${((durationSec * 1.1) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
+    { quality: "480p", fps: 30, size: `${((durationSec * 0.5) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
+    { quality: "360p", fps: 30, size: `${((durationSec * 0.3) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" }
+  ];
+
+  const audioFormats = [
+    { quality: "320 kbps", size: `${((durationSec * 40) / 1024).toFixed(1)} MB`, ext: "mp3", codec: "mp3", label: "MP3 - High Quality" },
+    { quality: "128 kbps", size: `${((durationSec * 16) / 1024).toFixed(1)} MB`, ext: "m4a", codec: "aac", label: "M4A - Standard" }
+  ];
 
   return {
     id: videoId,
     title,
     channel,
     thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-    duration: "3:45",
-    views: "1.2M views",
-    uploaded: "Recently",
+    duration: durationStr,
+    views: viewsStr,
+    uploaded: uploadedStr,
     formats: {
-      video: [
-        { quality: "1080p", fps: 30, size: "15.4 MB", ext: "mp4", codec: "h264/aac" },
-        { quality: "720p", fps: 30, size: "8.1 MB", ext: "mp4", codec: "h264/aac" },
-        { quality: "480p", fps: 30, size: "4.8 MB", ext: "mp4", codec: "h264/aac" },
-        { quality: "360p", fps: 30, size: "2.5 MB", ext: "mp4", codec: "h264/aac" }
-      ],
-      audio: [
-        { quality: "320 kbps", size: "4.1 MB", ext: "mp3", codec: "mp3", label: "MP3 - High Quality" },
-        { quality: "128 kbps", size: "2.2 MB", ext: "m4a", codec: "aac", label: "M4A - Standard" },
-        { quality: "96 kbps", size: "1.4 MB", ext: "webm", codec: "opus", label: "WEBM - Low Quality" }
-      ]
+      video: videoFormats,
+      audio: audioFormats
     }
   };
 }
