@@ -1,621 +1,307 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import os from "os";
 import axios from "axios";
-import { exec, spawn } from "child_process";
-import { promisify } from "util";
+import ytdl from "@distube/ytdl-core";
 
-const execAsync = promisify(exec);
-
-// Configuration
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const HISTORY_FILE = path.join(process.cwd(), "downloads_history.json");
+// Middleware
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  next();
+});
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Buffers for valid silent MP3 and blank MP4
-const SILENT_MP3 = Buffer.from(
-  "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGFtZTMuOTguNAAAAAAAAAAAAAAAAP/N0QAAAAAAYAAAAAAAAAAAAAAAMAAAAP/N0QAAAAAAYAAAAAAAAAAAAAAAMAAAAP/N0QAAAAAAYAAAAAAAAAAAAAAAMAAAAP/N0QAAAAAAYAAAAAAAAAAAAAAAMAAAA=",
-  "base64"
-);
+// Helper: Format bytes to MB/KB
+const formatBytes = (bytes: number): string => {
+  if (!bytes || isNaN(bytes)) return "0 MB";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+};
 
-const BLANK_MP4 = Buffer.from(
-  "AAAAHGZ0eXBtcDQyAAAAAG1wNDJpc29tYXZjMQAAAzptb292AAAAbG12aGQAAAAA3u9mFt7vZhYAAAABAAAArAAAAAQAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAYnRyYWsAAABcdGtoZAAAAAPe72YW3u9mFgAAAAEAAAAAAAABAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAcbWRpYQAAACBtZGhkAAAAAN7vZhbe72YWAAAAEAAAAAAAcAAAAAAALWhkcmxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAAVxtZGluZgAAABxtbmhkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAFCbXN0YmwAAABYc3RzZAAAAAAAAAABAAAAKG1wNHYAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAYAGAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABgkaW5mbyAAAAAAAGVzdHRzAAAAAAAAAAEAAAABAAABAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAAAAAAAAAQAAABxzdGNvAAAAAAAAAAEAAAAwAAAAYXVkcmUAAAAId2lkZQAAAAFubWRhdA==",
-  "base64"
-);
+// Helper: Format seconds into MM:SS or HH:MM:SS
+const formatDuration = (seconds: number): string => {
+  const sec = Math.max(0, parseInt(String(seconds), 10) || 0);
+  const hours = Math.floor(sec / 3600);
+  const min = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  if (hours > 0) return `${hours}:${pad(min)}:${pad(s)}`;
+  return `${min}:${pad(s)}`;
+};
 
-// In-memory cache for high-quality, real, playable media samples
-let cachedVideoBuffer: Buffer | null = null;
-let cachedAudioBuffer: Buffer | null = null;
+// Extract Video ID from URL
+const extractVideoId = (urlStr: string): string => {
+  if (!urlStr) return "";
+  const match = urlStr.match(/(?:youtu\.be\/|watch\?v=|shorts\/|embed\/)([^#\&\?]*)/);
+  return match && match[1] ? match[1] : urlStr.trim();
+};
 
-// Helper to retrieve a robust, playable media track
-async function getPlayableMediaBuffer(format: string): Promise<Buffer> {
-  if (format === "audio") {
-    if (cachedAudioBuffer) return cachedAudioBuffer;
-    try {
-      console.log("Fetching high-quality silent MP3 sample...");
-      const audioUrl = "https://raw.githubusercontent.com/natesilva/silent-mp3/master/silent-2sec.mp3";
-      const response = await axios.get(audioUrl, { responseType: "arraybuffer", timeout: 4000 });
-      cachedAudioBuffer = Buffer.from(response.data);
-      return cachedAudioBuffer;
-    } catch (err) {
-      console.warn("Failed to fetch silent MP3 online. Falling back to built-in high-compatibility MP3.");
-      return SILENT_MP3;
-    }
-  } else {
-    if (cachedVideoBuffer) return cachedVideoBuffer;
-    try {
-      console.log("Fetching high-quality blank MP4 sample...");
-      const videoUrl = "https://www.w3schools.com/html/mov_bbb.mp4";
-      const response = await axios.get(videoUrl, { responseType: "arraybuffer", timeout: 5000 });
-      cachedVideoBuffer = Buffer.from(response.data);
-      return cachedVideoBuffer;
-    } catch (err) {
-      console.warn("Failed to fetch blank MP4 online. Falling back to built-in high-compatibility MP4.");
-      return BLANK_MP4;
-    }
-  }
-}
+// Extract YouTube metadata with automatic fallback
+async function fetchYouTubeMetadata(targetUrl: string) {
+  const videoId = extractVideoId(targetUrl);
+  let title = `YouTube Video (${videoId})`;
+  let channel = "YouTube Creator";
+  let thumbnail = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+  let durationSec = 30;
+  let viewsStr = "Popular";
+  let uploadedStr = "Recently";
+  let rawFormats: any[] = [];
 
-// Helper: Extract YouTube Video ID
-function getYoutubeId(url: string): string | null {
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|shorts\/)([^#\&\?]*).*/;
-  const match = url.trim().match(regExp);
-  return match && match[2].length === 11 ? match[2] : null;
-}
-
-// Helper: Deterministic Metadata Generator for consistency
-function getDeterministicMetadata(id: string) {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash << 5) - hash + id.charCodeAt(i);
-    hash |= 0;
-  }
-  hash = Math.abs(hash);
-
-  // Duration: 1m30s to 12m00s
-  const durationSec = 90 + (hash % 630);
-  const mins = Math.floor(durationSec / 60);
-  const secs = durationSec % 60;
-  const durationStr = `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-
-  // Views count
-  let viewsStr = "";
-  if (hash % 3 === 0) {
-    viewsStr = `${100 + (hash % 899)}K views`;
-  } else if (hash % 3 === 1) {
-    viewsStr = `${(1.1 + (hash % 98) / 10).toFixed(1)}M views`;
-  } else {
-    viewsStr = `${10 + (hash % 489)}M views`;
-  }
-
-  // Upload date
-  const periods = ["days ago", "weeks ago", "months ago", "years ago"];
-  const period = periods[hash % periods.length];
-  const value = 1 + (hash % (period === "days ago" ? 28 : period === "weeks ago" ? 4 : period === "months ago" ? 11 : 8));
-  const uploadedStr = `${value} ${value === 1 ? period.slice(0, -4) + " ago" : period}`;
-
-  return { duration: durationStr, views: viewsStr, uploaded: uploadedStr };
-}
-
-// Helper: Format Helpers for yt-dlp extracted data
-function formatDuration(seconds: number): string {
-  if (!seconds || isNaN(seconds)) return "0:00";
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-  
-  if (hours > 0) {
-    return `${hours}:${mins < 10 ? "0" : ""}${mins}:${secs < 10 ? "0" : ""}${secs}`;
-  }
-  return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-}
-
-function formatViews(viewCount: number): string {
-  if (!viewCount || isNaN(viewCount)) return "0 views";
-  if (viewCount >= 1000000000) {
-    return `${(viewCount / 1000000000).toFixed(1)}B views`;
-  }
-  if (viewCount >= 1000000) {
-    return `${(viewCount / 1000000).toFixed(1)}M views`;
-  }
-  if (viewCount >= 1000) {
-    return `${(viewCount / 1000).toFixed(0)}K views`;
-  }
-  return `${viewCount} views`;
-}
-
-function formatUploadDate(dateStr: string): string {
-  if (!dateStr || dateStr.length !== 8) return "Unknown date";
-  const year = dateStr.substring(0, 4);
-  const month = dateStr.substring(4, 6);
-  const day = dateStr.substring(6, 8);
-  const date = new Date(`${year}-${month}-${day}`);
-  if (isNaN(date.getTime())) return "Unknown date";
-  return date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
-
-// Helper: Load/Save History
-function loadHistory(): any[] {
+  // Try 1: @distube/ytdl-core getInfo
   try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      const data = fs.readFileSync(HISTORY_FILE, "utf-8");
-      return JSON.parse(data);
+    const info = await ytdl.getInfo(targetUrl);
+    const details = info.videoDetails;
+    title = details.title || title;
+    channel = details.author ? details.author.name : (details.ownerChannelName || channel);
+    durationSec = parseInt(details.lengthSeconds || "0", 10) || durationSec;
+    viewsStr = details.viewCount ? `${(parseInt(details.viewCount, 10) / 1000000).toFixed(1)}M views` : viewsStr;
+    uploadedStr = details.publishDate || uploadedStr;
+    if (details.thumbnails && details.thumbnails.length > 0) {
+      thumbnail = details.thumbnails[details.thumbnails.length - 1].url;
     }
-  } catch (err) {
-    console.error("Error loading download history:", err);
+    rawFormats = info.formats || [];
+  } catch (ytdlErr) {
+    console.warn("[ytdl.getInfo fallback triggered]:", (ytdlErr as Error).message);
+
+    // Try 2: oEmbed for real Title & Channel
+    try {
+      const oembedRes = await axios.get(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`, { timeout: 3500 });
+      if (oembedRes.data && oembedRes.data.title) {
+        title = oembedRes.data.title;
+        channel = oembedRes.data.author_name || channel;
+      }
+    } catch (_) {}
+
+    // Try 3: HTML Regex for real Duration, Views, Date
+    try {
+      const pageRes = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" },
+        timeout: 5000
+      });
+      const html = pageRes.data || "";
+      const mSec = html.match(/"lengthSeconds":"(\d+)"/);
+      if (mSec && parseInt(mSec[1], 10) > 0) {
+        durationSec = parseInt(mSec[1], 10);
+      }
+      const mViews = html.match(/"viewCount":"(\d+)"/);
+      if (mViews) {
+        const vNum = parseInt(mViews[1], 10);
+        viewsStr = vNum >= 1000000 ? `${(vNum / 1000000).toFixed(1)}M views` : vNum >= 1000 ? `${(vNum / 1000).toFixed(1)}K views` : `${vNum} views`;
+      }
+      const mDate = html.match(/"publishDate":"([^"]+)"/);
+      if (mDate) {
+        uploadedStr = mDate[1].split("T")[0];
+      }
+    } catch (_) {}
   }
-  return [];
-}
 
-function saveHistory(history: any[]) {
-  try {
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), "utf-8");
-  } catch (err) {
-    console.error("Error saving download history:", err);
+  // Parse or calculate video formats matching REAL duration
+  const videoFormatsMap = new Map();
+  if (rawFormats.length > 0) {
+    rawFormats.forEach((f) => {
+      if (f.hasVideo && f.qualityLabel) {
+        const quality = f.qualityLabel;
+        const approxBytes = f.contentLength
+          ? parseInt(f.contentLength, 10)
+          : (f.bitrate ? Math.round((f.bitrate * durationSec) / 8) : null);
+        videoFormatsMap.set(quality, {
+          quality: f.qualityLabel,
+          ext: f.container || "mp4",
+          fps: f.fps || 30,
+          codec: f.codecs || "h264/aac",
+          size: formatBytes(approxBytes || Math.round((durationSec * (f.height || 720) * 1000) / 8))
+        });
+      }
+    });
   }
-}
 
-// Cross-platform helper to spawn yt-dlp on both Windows and Linux
-function spawnYtDlp(extraArgs: string[]) {
-  if (os.platform() === "win32") {
-    return spawn("py", ["-m", "yt_dlp", ...extraArgs]);
+  const videoFormats = Array.from(videoFormatsMap.values()).sort((a, b) => {
+    const qA = parseInt(a.quality.replace("p", ""), 10) || 0;
+    const qB = parseInt(b.quality.replace("p", ""), 10) || 0;
+    return qB - qA;
+  });
+
+  if (videoFormats.length === 0) {
+    videoFormats.push(
+      { quality: "1080p", fps: 30, ext: "mp4", codec: "h264/aac", size: formatBytes(Math.round((durationSec * 1080 * 2200) / 8)) },
+      { quality: "720p", fps: 30, ext: "mp4", codec: "h264/aac", size: formatBytes(Math.round((durationSec * 720 * 1100) / 8)) },
+      { quality: "480p", fps: 30, ext: "mp4", codec: "h264/aac", size: formatBytes(Math.round((durationSec * 480 * 500) / 8)) },
+      { quality: "360p", fps: 30, ext: "mp4", codec: "h264/aac", size: formatBytes(Math.round((durationSec * 360 * 300) / 8)) }
+    );
   }
-  return spawn("yt-dlp", extraArgs);
-}
 
-// Fallback helper to fetch real media streams via Cobalt API v10 if local yt-dlp is blocked on cloud server
-async function fetchRealMediaStreamFromAPI(videoUrl: string, format: string, quality: string): Promise<Buffer | null> {
-  const cleanQuality = quality.replace("p", "") || "720";
-  const bodyPayloadV10 = {
-    url: videoUrl,
-    videoQuality: cleanQuality,
-    downloadMode: format === "audio" ? "audio" : "auto",
-    audioFormat: "mp3"
-  };
-
-  const bodyPayloadLegacy = {
-    url: videoUrl,
-    vQuality: cleanQuality,
-    isAudioOnly: format === "audio",
-    aFormat: "mp3"
-  };
-
-  const apis = [
-    { url: "https://api.cobalt.tools/", body: bodyPayloadV10 },
-    { url: "https://cobalt.tools/api/json", body: bodyPayloadLegacy },
-    { url: "https://co.wuk.sh/api/json", body: bodyPayloadLegacy }
+  const audioFormats = [
+    { quality: "320 kbps", ext: "mp3", codec: "mp3", size: formatBytes(Math.round((durationSec * 320000) / 8)), label: "MP3 - High Quality" },
+    { quality: "128 kbps", ext: "m4a", codec: "aac", size: formatBytes(Math.round((durationSec * 128000) / 8)), label: "M4A - Standard" }
   ];
 
-  for (const target of apis) {
-    try {
-      console.log(`Trying fallback media streaming API (${target.url}) for: ${videoUrl}`);
-      const response = await axios.post(target.url, target.body, {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        },
-        timeout: 12000
-      });
-
-      const resUrl = response.data?.url || response.data?.redirect || response.data?.picker?.[0]?.url;
-      if (resUrl) {
-        console.log(`Found direct stream URL via API (${resUrl.substring(0, 60)}...)! Downloading media buffer...`);
-        const fileRes = await axios.get(resUrl, { responseType: "arraybuffer", timeout: 35000 });
-        return Buffer.from(fileRes.data);
-      }
-    } catch (err: any) {
-      console.warn(`Fallback API endpoint ${target.url} failed:`, err.message);
+  return {
+    id: videoId,
+    title,
+    channel,
+    author: channel,
+    thumbnail,
+    duration: formatDuration(durationSec),
+    durationSeconds: durationSec,
+    views: viewsStr,
+    uploaded: uploadedStr,
+    videoFormats,
+    audioFormats,
+    formats: {
+      video: videoFormats,
+      audio: audioFormats
     }
+  };
+}
+
+// Fallback helper to resolve direct stream URL from Invidious
+async function getDirectStreamUrl(videoId: string, format: string, quality: string): Promise<string> {
+  const hosts = [
+    "https://invidious.flokinet.to",
+    "https://invidious.nerdvpn.de",
+    "https://yt.artemislena.eu",
+    "https://inv.tux.pizza"
+  ];
+  const itag = format === "audio" ? "140" : (quality.includes("1080") ? "22" : "18");
+
+  for (const host of hosts) {
+    try {
+      const streamUrl = `${host}/latest_version?id=${videoId}&itag=${itag}`;
+      const check = await axios.head(streamUrl, { timeout: 3500 });
+      if (check.status === 200 || check.status === 302) {
+        return streamUrl;
+      }
+    } catch (_) {}
   }
-  return null;
+  return `https://invidious.flokinet.to/latest_version?id=${videoId}&itag=${itag}`;
 }
 
-// Function to fetch metadata using yt-dlp
-function getYtDlpMetadata(url: string): Promise<any> {
-  return new Promise((resolve) => {
-    console.log(`Executing yt-dlp metadata fetch for: ${url}`);
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-    const ytDlp = spawnYtDlp([
-      "--js-runtimes", "node",
-      "--no-check-certificates",
-      "--geo-bypass",
-      "--user-agent", userAgent,
-      "-j",
-      "--no-playlist",
-      url
-    ]);
-    let stdoutData = "";
-    let stderrData = "";
-    
-    ytDlp.stdout.on("data", (data) => {
-      stdoutData += data.toString();
-    });
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
 
-    ytDlp.stderr.on("data", (data) => {
-      stderrData += data.toString();
-    });
+// GET /api/info
+app.get("/api/info", async (req, res) => {
+  const { url, id } = req.query;
+  const targetUrl = (url as string) || (id ? `https://www.youtube.com/watch?v=${id}` : null);
 
-    const timeout = setTimeout(() => {
-      console.warn("yt-dlp metadata extraction timed out after 10s");
-      ytDlp.kill();
-      resolve(null);
-    }, 10000);
-
-    ytDlp.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) {
-        try {
-          const data = JSON.parse(stdoutData);
-          resolve(data);
-        } catch (err) {
-          console.error("Failed to parse yt-dlp JSON output:", err);
-          resolve(null);
-        }
-      } else {
-        console.warn(`yt-dlp exited with code ${code}. Error:`, stderrData);
-        resolve(null);
-      }
-    });
-  });
-}
-
-async function startServer() {
-  const app = express();
-  app.use(express.json());
-
-  // Enable CORS for Vercel cross-origin requests
-  app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") {
-      res.sendStatus(200);
-      return;
-    }
-    next();
-  });
-
-  // API Endpoints
-
-  // 1. Get YouTube Video Info
-  app.get("/api/info", async (req, res) => {
-    const videoUrl = req.query.url as string;
-    if (!videoUrl) {
-      res.status(400).json({ error: "URL parameter is required" });
-      return;
-    }
-
-    const videoId = getYoutubeId(videoUrl);
-    if (!videoId) {
-      res.status(400).json({ error: "Invalid YouTube URL format. Please paste a valid YouTube video or shorts link." });
-      return;
-    }
-
-    try {
-      const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const ytDlpData = await getYtDlpMetadata(fullUrl);
-
-      if (ytDlpData) {
-        console.log(`Successfully fetched real yt-dlp metadata for: ${videoId}`);
-        
-        // Extract real video sizes or fallbacks based on formats
-        // Let's create realistic estimated file sizes for the user's selected qualities
-        const durationSec = ytDlpData.duration || 120;
-        
-        // Formats structure matched exactly to App.tsx expectations
-        const videoFormats = [
-          { quality: "1080p", fps: 30, size: `${((durationSec * 1.5) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
-          { quality: "720p", fps: 30, size: `${((durationSec * 0.8) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
-          { quality: "480p", fps: 30, size: `${((durationSec * 0.4) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" },
-          { quality: "360p", fps: 30, size: `${((durationSec * 0.2) / 8).toFixed(1)} MB`, ext: "mp4", codec: "h264/aac" }
-        ];
-
-        const audioFormats = [
-          { quality: "320 kbps", size: `${((durationSec * 320) / 8192).toFixed(1)} MB`, ext: "mp3", codec: "mp3", label: "MP3 - High Quality" },
-          { quality: "128 kbps", size: `${((durationSec * 128) / 8192).toFixed(1)} MB`, ext: "m4a", codec: "aac", label: "M4A - Standard" },
-          { quality: "96 kbps", size: `${((durationSec * 96) / 8192).toFixed(1)} MB`, ext: "webm", codec: "opus", label: "WEBM - Low Quality" }
-        ];
-
-        res.json({
-          id: videoId,
-          title: ytDlpData.title || "Unknown YouTube Video",
-          channel: ytDlpData.channel || ytDlpData.uploader || "Unknown Channel",
-          thumbnail: ytDlpData.thumbnail || `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-          duration: formatDuration(ytDlpData.duration),
-          views: formatViews(ytDlpData.view_count),
-          uploaded: formatUploadDate(ytDlpData.upload_date) || "Recently",
-          formats: {
-            video: videoFormats,
-            audio: audioFormats
-          }
-        });
-        return;
-      }
-
-      // If yt-dlp fails, fallback to oEmbed + deterministic metadata
-      console.warn("yt-dlp metadata failed. Falling back to oEmbed.");
-      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-      const response = await axios.get(oembedUrl);
-      const data = response.data;
-      const deterministic = getDeterministicMetadata(videoId);
-      
-      res.json({
-        id: videoId,
-        title: data.title || "Unknown YouTube Video",
-        channel: data.author_name || "Unknown Channel",
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: deterministic.duration,
-        views: deterministic.views,
-        uploaded: deterministic.uploaded,
-        formats: {
-          video: [
-            { quality: "1080p", fps: 30, size: "15.4 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "720p", fps: 30, size: "8.1 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "480p", fps: 30, size: "4.8 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "360p", fps: 30, size: "2.5 MB", ext: "mp4", codec: "h264/aac" }
-          ],
-          audio: [
-            { quality: "320 kbps", size: "4.1 MB", ext: "mp3", codec: "mp3", label: "MP3 - High Quality" },
-            { quality: "128 kbps", size: "2.2 MB", ext: "m4a", codec: "aac", label: "M4A - Standard" },
-            { quality: "96 kbps", size: "1.4 MB", ext: "webm", codec: "opus", label: "WEBM - Low Quality" }
-          ]
-        }
-      });
-    } catch (error: any) {
-      console.warn("oEmbed failed, falling back to deterministic metadata retrieval", error.message);
-      
-      const deterministic = getDeterministicMetadata(videoId);
-      res.json({
-        id: videoId,
-        title: `YouTube Video (${videoId})`,
-        channel: "YouTube Creator",
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-        duration: deterministic.duration,
-        views: deterministic.views,
-        uploaded: deterministic.uploaded,
-        formats: {
-          video: [
-            { quality: "1080p", fps: 30, size: "15.4 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "720p", fps: 30, size: "8.1 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "480p", fps: 30, size: "4.8 MB", ext: "mp4", codec: "h264/aac" },
-            { quality: "360p", fps: 30, size: "2.5 MB", ext: "mp4", codec: "h264/aac" }
-          ],
-          audio: [
-            { quality: "320 kbps", size: "4.1 MB", ext: "mp3", codec: "mp3", label: "MP3 - High Quality" },
-            { quality: "128 kbps", size: "2.2 MB", ext: "m4a", codec: "aac", label: "M4A - Standard" },
-            { quality: "96 kbps", size: "1.4 MB", ext: "webm", codec: "opus", label: "WEBM - Low Quality" }
-          ]
-        }
-      });
-    }
-  });
-
-  // 2. Stream File Download
-  app.get("/api/download", async (req, res) => {
-    const id = req.query.id as string;
-    const format = req.query.format as string; // 'video' | 'audio'
-    const quality = req.query.quality as string;
-    const title = (req.query.title as string) || "Download";
-
-    if (!id || !format || !quality) {
-      res.status(400).send("Missing download parameters");
-      return;
-    }
-
-    const videoUrl = `https://www.youtube.com/watch?v=${id}`;
-    const cleanTitle = title.replace(/[\\/*?:"<>|]/g, ""); // strip invalid characters
-    
-    const ext = format === "audio" 
-      ? (quality.includes("m4a") ? "m4a" : quality.includes("webm") ? "webm" : "mp3") 
-      : "mp4";
-    const contentType = format === "audio"
-      ? (ext === "m4a" ? "audio/mp4" : ext === "webm" ? "audio/webm" : "audio/mpeg")
-      : "video/mp4";
-
-    const filename = `${cleanTitle} (${quality}).${ext}`;
-    
-    // Create a secure unique temp file path in the system temporary directory
-    const tempFileId = `${id}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-    const tempFilePath = path.join(os.tmpdir(), `ytdl_${tempFileId}.${ext}`);
-
-    console.log(`Starting real download of ${videoUrl} in ${format} format (${quality}) -> ${tempFilePath}`);
-
-    // Formulate robust yt-dlp arguments
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-    let args: string[] = [];
-    if (format === "audio") {
-      let bitrate = "128K";
-      if (quality.includes("320")) bitrate = "320K";
-      if (quality.includes("96")) bitrate = "96K";
-      
-      args = [
-        "--js-runtimes", "node",
-        "--no-check-certificates",
-        "--geo-bypass",
-        "--user-agent", userAgent,
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", bitrate,
-        videoUrl,
-        "-o", tempFilePath
-      ];
-    } else {
-      const height = quality.replace("p", "");
-      args = [
-        "--js-runtimes", "node",
-        "--no-check-certificates",
-        "--geo-bypass",
-        "--user-agent", userAgent,
-        "-f", `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`,
-        "--merge-output-format", "mp4",
-        videoUrl,
-        "-o", tempFilePath
-      ];
-    }
-
-    const ytDlpProcess = spawnYtDlp(args);
-
-    let isClosed = false;
-
-    // Handle client abortion/disconnect
-    req.on("close", () => {
-      isClosed = true;
-      if (ytDlpProcess && ytDlpProcess.kill) {
-        console.log(`Client aborted download request. Killing yt-dlp process: ${ytDlpProcess.pid}`);
-        ytDlpProcess.kill();
-      }
-      // Safe delayed clean up to let file handles close
-      setTimeout(() => {
-        try {
-          if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
-            console.log(`Deleted cancelled temp file: ${tempFilePath}`);
-          }
-        } catch (err) {
-          // ignore
-        }
-      }, 1000);
-    });
-
-    ytDlpProcess.stderr.on("data", (data) => {
-      console.log(`[yt-dlp-stderr]: ${data.toString().trim()}`);
-    });
-
-    ytDlpProcess.stdout.on("data", (data) => {
-      console.log(`[yt-dlp-stdout]: ${data.toString().trim()}`);
-    });
-
-    ytDlpProcess.on("close", async (code) => {
-      if (isClosed) return;
-
-      if (code === 0 && fs.existsSync(tempFilePath)) {
-        try {
-          const stats = fs.statSync(tempFilePath);
-          console.log(`yt-dlp extraction complete! Serving file: ${tempFilePath} (${stats.size} bytes)`);
-
-          res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-          res.setHeader("Content-Type", contentType);
-          res.setHeader("Content-Length", stats.size);
-
-          const readStream = fs.createReadStream(tempFilePath);
-          readStream.pipe(res);
-
-          readStream.on("close", () => {
-            // Clean up the temp file after the streaming finishes
-            try {
-              if (fs.existsSync(tempFilePath)) {
-                fs.unlinkSync(tempFilePath);
-                console.log(`Successfully cleaned up temp file: ${tempFilePath}`);
-              }
-            } catch (unlinkErr) {
-              console.error(`Failed to delete temp file ${tempFilePath}:`, unlinkErr);
-            }
-          });
-        } catch (err: any) {
-          console.error("Failed to read downloaded temp file:", err.message);
-          if (!res.headersSent) {
-            res.status(500).send("Failed to stream downloaded file");
-          }
-        }
-      } else {
-        console.warn(`yt-dlp exited with code ${code}. Fetching real video stream via API...`);
-        try {
-          const realBuffer = await fetchRealMediaStreamFromAPI(videoUrl, format, quality);
-          if (realBuffer && realBuffer.length > 50000) {
-            console.log(`Successfully retrieved real media buffer (${realBuffer.length} bytes)! Serving exact requested file.`);
-            res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-            res.setHeader("Content-Type", contentType);
-            res.setHeader("Content-Length", realBuffer.length);
-            res.write(realBuffer);
-            res.end();
-            return;
-          }
-        } catch (apiErr: any) {
-          console.error("API real stream fallback failed:", apiErr.message);
-        }
-
-        console.warn("Fallback to sample audio/video buffer.");
-        try {
-          const dataBuffer = await getPlayableMediaBuffer(format);
-
-          res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-          res.setHeader("Content-Type", contentType);
-          res.setHeader("Content-Length", dataBuffer.length);
-
-          res.write(dataBuffer);
-          res.end();
-        } catch (fallbackErr: any) {
-          console.error("Playback fallback stream failed:", fallbackErr.message);
-          if (!res.headersSent) {
-            res.status(500).send("Failed to stream fallback file");
-          }
-        }
-      }
-    });
-  });
-
-  // 3. History Endpoints
-  app.get("/api/history", (req, res) => {
-    res.json(loadHistory());
-  });
-
-  app.post("/api/history", (req, res) => {
-    const record = req.body;
-    if (!record || !record.id || !record.title) {
-      res.status(400).json({ error: "Invalid record data" });
-      return;
-    }
-
-    const history = loadHistory();
-    const newRecord = {
-      ...record,
-      timestamp: new Date().toISOString(),
-      uniqueId: Math.random().toString(36).substring(2, 11)
-    };
-
-    history.unshift(newRecord);
-    if (history.length > 50) {
-      history.pop();
-    }
-
-    saveHistory(history);
-    res.json(newRecord);
-  });
-
-  app.delete("/api/history", (req, res) => {
-    saveHistory([]);
-    res.json({ success: true, message: "History cleared successfully" });
-  });
-
-  // Vite Integration
-  const distPath = path.join(process.cwd(), "dist");
-  const isProductionMode = process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, "index.html"));
-
-  if (!isProductionMode) {
-    try {
-      const { createServer: createViteServer } = await import("vite");
-      const vite = await createViteServer({
-        server: { middlewareMode: true },
-        appType: "spa",
-      });
-      app.use(vite.middlewares);
-    } catch (_) {
-      app.use(express.static(distPath));
-      app.get("*", (req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
-      });
-    }
-  } else {
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+  if (!targetUrl) {
+    return res.status(400).json({ success: false, message: "Missing YouTube URL parameter." });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  try {
+    const details = await fetchYouTubeMetadata(targetUrl);
+    return res.json({ success: true, ...details });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: (err as Error).message });
+  }
+});
+
+// Streaming Download Handler
+const handleDownload = async (req: express.Request, res: express.Response) => {
+  const { url, id, format, quality } = req.query;
+  const targetUrl = (url as string) || (id ? `https://www.youtube.com/watch?v=${id}` : null);
+  const videoId = extractVideoId(targetUrl || "");
+  const isAudio = format === "audio" || req.url.includes("/audio");
+  const ext = isAudio ? "mp3" : "mp4";
+
+  if (!targetUrl) {
+    return res.status(400).send("Missing YouTube URL parameter.");
+  }
+
+  try {
+    const meta = await fetchYouTubeMetadata(targetUrl);
+    const cleanTitle = (meta.title || "video").replace(/[\\/*?:"<>|]/g, "");
+    const filename = `${cleanTitle}${quality ? ` (${quality})` : ""}.${ext}`;
+
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.setHeader("Content-Type", isAudio ? "audio/mpeg" : "video/mp4");
+
+    const stream = ytdl(targetUrl, {
+      quality: isAudio ? "highestaudio" : (quality ? "highestvideo" : "highest"),
+      filter: isAudio ? "audioonly" : (f => f.hasVideo && f.hasAudio)
+    });
+
+    stream.on("error", async (err) => {
+      console.warn("[ytdl stream error, switching to direct proxy]:", err.message);
+      if (!res.headersSent) {
+        try {
+          const directUrl = await getDirectStreamUrl(videoId, isAudio ? "audio" : "video", (quality as string) || "");
+          const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 30000 });
+          res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+          res.setHeader("Content-Type", isAudio ? "audio/mpeg" : "video/mp4");
+          proxyRes.data.pipe(res);
+        } catch (pErr) {
+          console.error("Proxy stream error:", (pErr as Error).message);
+        }
+      }
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    console.warn("[ytdl catch, proxying direct stream]:", (err as Error).message);
+    try {
+      const filename = `YouTube_${isAudio ? "Audio" : "Video"}_${videoId}.${ext}`;
+      const directUrl = await getDirectStreamUrl(videoId, isAudio ? "audio" : "video", (quality as string) || "");
+      const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 30000 });
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader("Content-Type", isAudio ? "audio/mpeg" : "video/mp4");
+      proxyRes.data.pipe(res);
+    } catch (pErr) {
+      if (!res.headersSent) {
+        return res.status(500).send(`Download failed: ${(pErr as Error).message}`);
+      }
+    }
+  }
+};
+
+app.get("/api/download/video", handleDownload);
+app.get("/api/download/audio", handleDownload);
+app.get("/api/download", handleDownload);
+
+// Download History Routes
+app.get("/api/history", (req, res) => {
+  if (fs.existsSync(HISTORY_FILE)) {
+    try {
+      const data = fs.readFileSync(HISTORY_FILE, "utf-8");
+      return res.json(JSON.parse(data));
+    } catch (_) {}
+  }
+  res.json([]);
+});
+
+app.delete("/api/history", (req, res) => {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      fs.writeFileSync(HISTORY_FILE, "[]", "utf-8");
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Serve static frontend in production
+const distPath = path.join(process.cwd(), "dist");
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get("*", (req, res, next) => {
+    if (req.url.startsWith("/api")) return next();
+    res.sendFile(path.join(distPath, "index.html"));
   });
 }
 
-startServer();
+// Start Server
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 TubeFetch Server running on port ${PORT}`);
+});
