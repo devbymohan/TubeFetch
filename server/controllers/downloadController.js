@@ -1,10 +1,28 @@
 import ytdl from "@distube/ytdl-core";
+import axios from "axios";
 import { isValidUrl, getVideoDetails } from "../utils/ytdl.js";
 
-/**
- * Controller to fetch YouTube video information
- * GET /api/info?url=
- */
+async function getFallbackStreamUrl(videoId, format, quality) {
+  const invidiousHosts = [
+    "https://invidious.flokinet.to",
+    "https://invidious.nerdvpn.de",
+    "https://yt.artemislena.eu",
+    "https://inv.tux.pizza"
+  ];
+  const itag = format === "audio" ? "140" : (quality && quality.includes("1080") ? "22" : "18");
+
+  for (const host of invidiousHosts) {
+    try {
+      const streamUrl = `${host}/latest_version?id=${videoId}&itag=${itag}`;
+      const check = await axios.head(streamUrl, { timeout: 3500 });
+      if (check.status === 200 || check.status === 302) {
+        return streamUrl;
+      }
+    } catch (_) {}
+  }
+  return `https://invidious.flokinet.to/latest_version?id=${videoId}&itag=${itag}`;
+}
+
 export const getVideoInfo = async (req, res, next) => {
   try {
     const { url } = req.query;
@@ -19,7 +37,7 @@ export const getVideoInfo = async (req, res, next) => {
     if (!isValidUrl(url)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid YouTube URL provided. Please enter a valid YouTube video link."
+        message: "Invalid YouTube URL provided."
       });
     }
 
@@ -38,116 +56,112 @@ export const getVideoInfo = async (req, res, next) => {
   }
 };
 
-/**
- * Controller to download video stream by quality
- * GET /api/download/video?url=&quality=
- */
 export const downloadVideo = async (req, res, next) => {
+  const { url, quality, id } = req.query;
+  const targetUrl = url || (id ? `https://www.youtube.com/watch?v=${id}` : null);
+  const videoId = id || (targetUrl ? (targetUrl.match(/(?:youtu\.be\/|watch\?v=|shorts\/)([^#\&\?]*)/) || [])[1] : "video");
+
+  if (!targetUrl) {
+    return res.status(400).send("Missing YouTube URL parameter.");
+  }
+
   try {
-    const { url, quality } = req.query;
-
-    if (!url) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing YouTube URL parameter."
-      });
-    }
-
-    if (!isValidUrl(url)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid YouTube URL provided."
-      });
-    }
-
-    const info = await ytdl.getInfo(url);
+    const info = await ytdl.getInfo(targetUrl);
     const cleanTitle = (info.videoDetails.title || "video").replace(/[\\/*?:"<>|]/g, "");
     const filename = `${cleanTitle}${quality ? ` (${quality})` : ""}.mp4`;
 
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
     res.setHeader("Content-Type", "video/mp4");
 
-    // Stream video directly to client using @distube/ytdl-core
-    const videoStream = ytdl(url, {
+    const videoStream = ytdl(targetUrl, {
       quality: quality ? "highestvideo" : "highest",
-      filter: (format) => format.hasVideo && format.hasAudio
+      filter: (f) => f.hasVideo && f.hasAudio
     });
 
-    // Fallback filter if combined stream not found
-    videoStream.on("error", (err) => {
-      console.warn("[Video Stream Warning]:", err.message);
+    videoStream.on("error", async (err) => {
+      console.warn("[Video Stream Error]:", err.message);
       if (!res.headersSent) {
-        // Try fallback filter
-        const fallbackStream = ytdl(url, { quality: "highest" });
-        fallbackStream.pipe(res);
+        try {
+          const directUrl = await getFallbackStreamUrl(videoId, "video", quality);
+          const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 25000 });
+          res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+          res.setHeader("Content-Type", "video/mp4");
+          proxyRes.data.pipe(res);
+        } catch (proxyErr) {
+          console.error("[Proxy Stream Error]:", proxyErr.message);
+        }
       }
     });
 
     videoStream.pipe(res);
   } catch (error) {
-    console.error("[downloadVideo Error]:", error.message);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: `Failed to download video stream: ${error.message}`
-      });
+    console.error("[downloadVideo Catch Error]:", error.message);
+    try {
+      const filename = `YouTube_Video_${videoId}.mp4`;
+      const directUrl = await getFallbackStreamUrl(videoId, "video", quality);
+      const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 25000 });
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader("Content-Type", "video/mp4");
+      proxyRes.data.pipe(res);
+    } catch (proxyErr) {
+      if (!res.headersSent) {
+        return res.status(500).send(`Failed to download video stream: ${proxyErr.message}`);
+      }
     }
   }
 };
 
-/**
- * Controller to download audio stream as MP3
- * GET /api/download/audio?url=
- */
 export const downloadAudio = async (req, res, next) => {
+  const { url, id } = req.query;
+  const targetUrl = url || (id ? `https://www.youtube.com/watch?v=${id}` : null);
+  const videoId = id || (targetUrl ? (targetUrl.match(/(?:youtu\.be\/|watch\?v=|shorts\/)([^#\&\?]*)/) || [])[1] : "audio");
+
+  if (!targetUrl) {
+    return res.status(400).send("Missing YouTube URL parameter.");
+  }
+
   try {
-    const { url } = req.query;
-
-    if (!url) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing YouTube URL parameter."
-      });
-    }
-
-    if (!isValidUrl(url)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid YouTube URL provided."
-      });
-    }
-
-    const info = await ytdl.getInfo(url);
+    const info = await ytdl.getInfo(targetUrl);
     const cleanTitle = (info.videoDetails.title || "audio").replace(/[\\/*?:"<>|]/g, "");
     const filename = `${cleanTitle}.mp3`;
 
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
     res.setHeader("Content-Type", "audio/mpeg");
 
-    // Stream highest quality audio directly to client
-    const audioStream = ytdl(url, {
+    const audioStream = ytdl(targetUrl, {
       quality: "highestaudio",
       filter: "audioonly"
     });
 
-    audioStream.on("error", (err) => {
+    audioStream.on("error", async (err) => {
       console.error("[Audio Stream Error]:", err.message);
       if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: `Audio streaming failed: ${err.message}`
-        });
+        try {
+          const directUrl = await getFallbackStreamUrl(videoId, "audio", "");
+          const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 25000 });
+          res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+          res.setHeader("Content-Type", "audio/mpeg");
+          proxyRes.data.pipe(res);
+        } catch (proxyErr) {
+          console.error("[Audio Proxy Error]:", proxyErr.message);
+        }
       }
     });
 
     audioStream.pipe(res);
   } catch (error) {
-    console.error("[downloadAudio Error]:", error.message);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: `Failed to download audio stream: ${error.message}`
-      });
+    console.error("[downloadAudio Catch Error]:", error.message);
+    try {
+      const filename = `YouTube_Audio_${videoId}.mp3`;
+      const directUrl = await getFallbackStreamUrl(videoId, "audio", "");
+      const proxyRes = await axios.get(directUrl, { responseType: "stream", timeout: 25000 });
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader("Content-Type", "audio/mpeg");
+      proxyRes.data.pipe(res);
+    } catch (proxyErr) {
+      if (!res.headersSent) {
+        return res.status(500).send(`Failed to download audio stream: ${proxyErr.message}`);
+      }
     }
   }
 };

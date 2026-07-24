@@ -130,8 +130,8 @@ async function fetchClientSideFallback(videoId: string): Promise<VideoInfo> {
   };
 }
 
-// Fallback helper to stream/download real YouTube media directly if backend server is suspended
-async function downloadRealVideoClientSide(videoId: string, format: "video" | "audio", quality: string): Promise<string | null> {
+// Fallback helper to stream/download real YouTube media directly into browser memory
+async function downloadRealVideoClientSide(videoId: string, format: "video" | "audio", quality: string, filename: string): Promise<boolean> {
   const invidiousHosts = [
     "https://invidious.flokinet.to",
     "https://invidious.nerdvpn.de",
@@ -144,17 +144,23 @@ async function downloadRealVideoClientSide(videoId: string, format: "video" | "a
   for (const host of invidiousHosts) {
     try {
       const directUrl = `${host}/latest_version?id=${videoId}&itag=${itag}`;
-      const checkRes = await axios.head(directUrl, { timeout: 3500 });
-      if (checkRes.status === 200 || checkRes.status === 302) {
-        return directUrl;
+      const res = await axios.get(directUrl, { responseType: "blob", timeout: 25000 });
+      if (res.data && res.data.size > 100000) {
+        const dlUrl = window.URL.createObjectURL(res.data);
+        const anchor = document.createElement("a");
+        anchor.href = dlUrl;
+        anchor.setAttribute("download", filename);
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => window.URL.revokeObjectURL(dlUrl), 5000);
+        return true;
       }
     } catch (_) {
       // try next host
     }
   }
-
-  // Guaranteed direct video stream fallback URL
-  return `https://invidious.flokinet.to/latest_version?id=${videoId}&itag=${itag}`;
+  return false;
 }
 
 const DEFAULT_BACKEND = "https://tubefetch-backend-jdb6.onrender.com";
@@ -432,19 +438,13 @@ export default function App() {
 
     } catch (err) {
       clearInterval(prepInterval);
-      console.warn("Backend server request failed or suspended. Attempting direct browser stream download...");
+      console.warn("Backend server request failed or blocked. Attempting direct browser stream download...");
       
       try {
-        const directUrl = await downloadRealVideoClientSide(videoInfo.id, format, quality);
-        if (directUrl) {
-          const anchor = document.createElement("a");
-          anchor.href = directUrl;
-          anchor.target = "_blank";
-          anchor.setAttribute("download", `${videoInfo.title}.${format === "audio" ? "mp3" : "mp4"}`);
-          document.body.appendChild(anchor);
-          anchor.click();
-          anchor.remove();
-
+        const ext = format === "audio" ? "mp3" : "mp4";
+        const filename = `${videoInfo.title} (${quality || "720p"}).${ext}`;
+        const isSaved = await downloadRealVideoClientSide(videoInfo.id, format, quality, filename);
+        if (isSaved) {
           const localHist = {
             id: videoInfo.id,
             title: videoInfo.title,
@@ -460,7 +460,7 @@ export default function App() {
           setHistory(prev => [localHist, ...prev]);
 
           setDownloadState(prev => ({ ...prev, isDownloading: false, progress: 100 }));
-          showToast("Direct video stream download started!", "success");
+          showToast("Direct video stream saved to your device!", "success");
           return;
         }
       } catch (fallbackErr) {
